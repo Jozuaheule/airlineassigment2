@@ -14,14 +14,25 @@ class DynamicProgrammingModel:
     def __init__(self, airports_df, demand_df, fleet_df, hour_coefficients_df, distance_matrix_df):
         self.airports = airports_df
         self.original_demand = demand_df.copy()
-        self.fleet_data = fleet_df
+        
+        # --- Expand fleet data to represent individual aircraft ---
+        expanded_fleet_list = []
+        for type_name, aircraft_type in fleet_df.iterrows():
+            for _ in range(int(aircraft_type['fleet_size'])):
+                new_row = aircraft_type.copy()
+                new_row['type'] = type_name
+                expanded_fleet_list.append(new_row)
+        self.fleet_data = pd.DataFrame(expanded_fleet_list)
+        self.fleet_data.reset_index(drop=True, inplace=True)
+        self.fleet_data['aircraft_id'] = self.fleet_data.index
+
         self.hour_coefficients = hour_coefficients_df
         self.distance_matrix = distance_matrix_df
         
         # --- Model Constants ---
         self.TIME_STEP_MINUTES = 6
         self.N_T = int(24 * 60 / self.TIME_STEP_MINUTES)
-        self.HUB_AIRPORT_ICAO = "EHAM"
+        self.HUB_AIRPORT_ICAO = "EGLL"
         self.MIN_BLOCK_HOURS = 6
         self.LOAD_FACTOR = 0.8
 
@@ -30,7 +41,7 @@ class DynamicProgrammingModel:
         self.icao_to_idx = {icao: i for i, icao in enumerate(self.airport_icaos)}
         self.idx_to_icao = {i: icao for i, icao in enumerate(self.airport_icaos)}
         self.N_P = len(self.airport_icaos)
-        self.N_A = len(self.fleet_data)
+        self.N_A = len(self.fleet_data) # N_A is now the total number of aircraft
 
         # --- Initialize Hourly Demand ---
         self.hourly_demand = np.zeros((self.N_P, self.N_P, 24))
@@ -58,17 +69,17 @@ class DynamicProgrammingModel:
             demands.append(current_hourly_demand[origin_idx, dest_idx, hour])
         return demands
 
-    def _reconstruct_and_deplete_demand(self, k, D, modifiable_hourly_demand):
+    def _reconstruct_and_deplete_demand(self, aircraft_id, D, modifiable_hourly_demand):
         """
         Reconstructs the schedule for a single aircraft, calculates its profitability,
-        and depletes demand sequentially.
+        and depletes demand sequentially. Enforces end-at-hub constraint.
         """
         schedule = []
         block_time_minutes = 0
         total_profit = 0
         current_t = 0
         current_loc_idx = self.icao_to_idx[self.HUB_AIRPORT_ICAO]
-        aircraft_specs = self.fleet_data.iloc[k]
+        aircraft_specs = self.fleet_data.iloc[aircraft_id]
 
         while current_t < self.N_T:
             decision_idx = D[current_t, current_loc_idx]
@@ -83,8 +94,8 @@ class DynamicProgrammingModel:
             
             flight_duration_minutes = (distance / speed * 60) + 30 if speed > 0 else float('inf')
             flight_duration_steps = int(np.ceil(flight_duration_minutes / self.TIME_STEP_MINUTES))
+            arrival_t = current_t + flight_duration_steps
 
-            # --- Sequential Demand Depletion Logic ---
             hour_t = int(np.floor(current_t / (60 / self.TIME_STEP_MINUTES)))
             passengers_to_take = self.LOAD_FACTOR * aircraft_specs.get('seats', 0)
             passengers_taken = 0
@@ -112,32 +123,48 @@ class DynamicProgrammingModel:
                 total_profit += profit
 
                 schedule.append({
-                    "aircraft_id": k, "type": aircraft_specs.name,
+                    "aircraft_id": aircraft_id, "type": aircraft_specs['type'],
                     "origin": origin_icao, "destination": dest_icao,
-                    "departure_time": current_t, "arrival_time": current_t + flight_duration_steps,
+                    "departure_time": current_t, "arrival_time": arrival_t,
                     "passengers": round(passengers_taken)
                 })
 
             block_time_minutes += flight_duration_minutes
-            current_t += flight_duration_steps
+            
+            tat_min = aircraft_specs.get('tat_min', 0)
+            tat_steps = int(np.ceil(tat_min / self.TIME_STEP_MINUTES))
+            current_t = arrival_t + tat_steps
+            
             current_loc_idx = decision_idx
+        
+        hub_idx = self.icao_to_idx[self.HUB_AIRPORT_ICAO]
+        if current_loc_idx != hub_idx:
+            return None, 0, 0
 
         if block_time_minutes / 60 >= self.MIN_BLOCK_HOURS:
             return schedule, block_time_minutes, total_profit
         
         return None, 0, 0
 
-    def solve(self):
+    def solve(self, sequencing_strategy=None):
         """
         Implements the full DP solver with a greedy heuristic for demand allocation.
+        Allows for different aircraft sequencing strategies.
         """
         final_schedules = []
+        total_net_profit = 0
         modifiable_hourly_demand = self.hourly_demand.copy()
 
-        print("Solving for each aircraft sequentially...")
-        for k in range(self.N_A):
-            aircraft_specs = self.fleet_data.iloc[k]
-            print(f"  Aircraft {k} ({aircraft_specs.name})...")
+        fleet_to_schedule = self.fleet_data
+        if sequencing_strategy:
+            ascending = 'cost' in sequencing_strategy or 'lease' in sequencing_strategy
+            fleet_to_schedule = self.fleet_data.sort_values(by=sequencing_strategy, ascending=ascending)
+        
+        aircraft_order = fleet_to_schedule.index
+
+        for aircraft_id in aircraft_order:
+            aircraft_specs = self.fleet_data.iloc[aircraft_id]
+            print(f"  Aircraft {aircraft_id} ({aircraft_specs['type']})...")
 
             V = np.zeros((self.N_T, self.N_P))
             D = np.full((self.N_T, self.N_P), -1, dtype=int)
@@ -167,7 +194,11 @@ class DynamicProgrammingModel:
                         flight_duration_steps = int(np.ceil(flight_duration_minutes / self.TIME_STEP_MINUTES))
                         t_arrival = t + flight_duration_steps
 
-                        if t_arrival >= self.N_T: continue
+                        tat_min = aircraft_specs.get('tat_min', 0)
+                        tat_steps = int(np.ceil(tat_min / self.TIME_STEP_MINUTES))
+                        t_ready = t_arrival + tat_steps
+                        
+                        if t_ready >= self.N_T: continue
 
                         demands = self._get_demand(t, i, j, modifiable_hourly_demand)
                         passengers = min(sum(demands), self.LOAD_FACTOR * aircraft_specs.get('seats', 0))
@@ -178,7 +209,7 @@ class DynamicProgrammingModel:
                         costs = calculate_costs(distance, aircraft_specs)['total_cost']
                         profit = revenue - costs
 
-                        v_fly = profit + V[t_arrival, j]
+                        v_fly = profit + V[t_ready, j]
 
                         if v_fly > best_value:
                             best_value = v_fly
@@ -187,19 +218,23 @@ class DynamicProgrammingModel:
                     V[t, i] = best_value
                     D[t, i] = best_decision
 
-            # --- Forward Pass, Profitability Check & Demand Depletion ---
             temp_hourly_demand = modifiable_hourly_demand.copy()
-            schedule, block_time, total_profit = self._reconstruct_and_deplete_demand(k, D, temp_hourly_demand)
+            schedule, block_time, schedule_profit = self._reconstruct_and_deplete_demand(aircraft_id, D, temp_hourly_demand)
             
             lease_cost = aircraft_specs.get('lease_cost_eur_day', 0)
-            if schedule and (total_profit > lease_cost):
-                print(f"    -> Profitable schedule found: {block_time/60:.2f} block hours, Profit (after lease): {total_profit - lease_cost:.2f} €")
+            net_profit = schedule_profit - lease_cost
+
+            if schedule and (net_profit > 0):
+                print(f"    -> Profitable schedule found: {block_time/60:.2f} block hours, Profit (after lease): {net_profit:.2f} €")
                 final_schedules.extend(schedule)
-                modifiable_hourly_demand = temp_hourly_demand # Commit demand depletion
+                total_net_profit += net_profit
+                modifiable_hourly_demand = temp_hourly_demand
+            elif not schedule:
+                 print(f"    -> Schedule discarded: Fails constraints (min block hours or ends at hub).")
             else:
-                print(f"    -> Schedule not profitable enough. Profit: {total_profit:.2f}, Lease Cost: {lease_cost:.2f}. Discarding.")
+                print(f"    -> Schedule not profitable enough. Gross Profit: {schedule_profit:.2f}, Lease Cost: {lease_cost:.2f}. Discarding.")
         
-        return final_schedules
+        return final_schedules, total_net_profit
 
 def calculate_revenue(distance, passengers):
     """Calculates revenue based on RPK."""
@@ -224,24 +259,43 @@ def main():
     fleet = load_fleet_data()
     hour_coeffs = load_hour_coefficients()
     distance_matrix = calculate_distance_matrix(airports)
-    print("--- Data Loading Complete ---\n")
+    print("--- Data Loading Complete ---")
 
-    dp_model = DynamicProgrammingModel(
-        airports_df=airports,
-        demand_df=demand,
-        fleet_df=fleet,
-        hour_coefficients_df=hour_coeffs,
-        distance_matrix_df=distance_matrix
-    )
+    # This is the raw fleet data with types
+    raw_fleet_df = load_fleet_data()
 
-    optimal_schedule = dp_model.solve()
+    strategies = {
+        "Default Order": None,
+        "Largest First (seats)": "seats",
+        "Cheapest First (lease)": "lease_cost_eur_day",
+        "Longest Range First": "range_km"
+    }
+    best_schedule = []
+    best_total_profit = -float('inf')
+    best_strategy_name = None
 
-    print("\n--- Optimal Schedule Found ---")
-    if not optimal_schedule:
+    for name, strategy_key in strategies.items():
+        print(f"--- Running Solver with Strategy: {name} ---")
+        # Re-initialize the model for a clean slate of demand data for each strategy
+        dp_model = DynamicProgrammingModel(
+            airports_df=airports, demand_df=demand, fleet_df=raw_fleet_df,
+            hour_coefficients_df=hour_coeffs, distance_matrix_df=distance_matrix
+        )
+        schedule, total_profit = dp_model.solve(sequencing_strategy=strategy_key)
+        if total_profit > best_total_profit:
+            best_total_profit = total_profit
+            best_schedule = schedule
+            best_strategy_name = name
+        print(f"--- Strategy '{name}' Total Profit: {total_profit:.2f} € ---")
+
+
+    print(f"\n--- Best Strategy Found: '{best_strategy_name}' with Total Profit: {best_total_profit:.2f} € ---")
+    if not best_schedule:
         print("No profitable flights found.")
     else:
-        schedule_df = pd.DataFrame(optimal_schedule)
-        # Convert time steps to HH:MM format for readability
+        schedule_df = pd.DataFrame(best_schedule)
+        schedule_df.sort_values(by=['aircraft_id', 'departure_time'], inplace=True)
+        
         schedule_df['departure_time'] = schedule_df['departure_time'].apply(
             lambda ts: f"{int(ts*6/60):02d}:{int(ts*6%60):02d}"
         )
@@ -252,4 +306,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
