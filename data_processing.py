@@ -92,8 +92,8 @@ def calculate_distance_matrix(airports_df):
 
 def load_fleet_data(file_path="FleetType.xlsx"):
     """
-    Loads the fleet data from the specified Excel file.
-    The data is transposed to have aircraft types as rows.
+    Loads the fleet data from the specified Excel file, transposes it,
+    and renames the columns to be more Python-friendly.
 
     Args:
         file_path (str): The path to the FleetType.xlsx file.
@@ -103,6 +103,24 @@ def load_fleet_data(file_path="FleetType.xlsx"):
     """
     fleet_df = pd.read_excel(file_path, index_col=0).T
     fleet_df.index.name = "Aircraft Type"
+
+    # Define the mapping from old column names to new, Python-friendly names
+    column_mapping = {
+        'Speed [km/h]': 'speed_kmh',
+        'Seats': 'seats',
+        'Average TAT [min]': 'tat_min',
+        'Maximum Range [km]': 'range_km',
+        'Runway Required [m]': 'runway_m',
+        'Lease Cost [€/day]': 'lease_cost_eur_day',
+        'Fixed Operating Cost (Per Fligth Leg)  [€]': 'fixed_op_cost_eur_flight',
+        'Cost per Hour': 'time_based_cost_eur_hour',
+        'Fuel Cost Parameter': 'fuel_cost_eur_kg',
+        'Fleet': 'fleet_size'
+    }
+    
+    # Rename the columns
+    fleet_df.rename(columns=column_mapping, inplace=True)
+    
     return fleet_df
 
 

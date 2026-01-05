@@ -9,8 +9,7 @@ Before starting the main DP loop, several data structures need to be initialized
 - **Time Steps:** Create a list or array representing the time steps for the 24-hour horizon (24 hours * 60 min/hour / 6 min/step = 240 steps).
 - **Airport Data:** Load and pre-process airport data. This includes calculating the distance matrix between the hub and all other airports. The hub airport needs to be identified.
 - **Fleet Data:** Load and pre-process fleet data.
-- **Demand Data:** Load the hou
-rly demand data. It should be structured for easy lookup by `(origin, destination, hour)`.
+- **Demand Data:** Load the hourly demand data. It should be structured for easy lookup by `(origin, destination, hour)`.
 - **DP Value Function Table:** Initialize a data structure to store the value function `V(k, t, i)`, which will represent the maximum profit achievable starting from time `t` at airport `i` with aircraft `k`. A multi-dimensional array or a dictionary of dictionaries could be used: `V[aircraft_id][time_step][airport_id]`. Initialize all values to zero or a very small number.
 - **Policy/Decision Table:** Initialize a parallel data structure `D(k, t, i)`. Crucially, this table will only store the single, optimal *next action* (e.g., the destination airport for a flight, or a special marker for "stay") for each state. It does not store the entire history. This table is used after the main loop to reconstruct the final schedule by chaining these individual optimal decisions together.
 
