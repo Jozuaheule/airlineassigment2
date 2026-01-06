@@ -166,7 +166,13 @@ class DynamicProgrammingModel:
             aircraft_specs = self.fleet_data.iloc[aircraft_id]
             print(f"  Aircraft {aircraft_id} ({aircraft_specs['type']})...")
 
-            V = np.zeros((self.N_T, self.N_P))
+            # Initialize V with a large negative penalty to enforce ending at the Hub.
+            # V[t, i] represents the max future profit from time t at airport i.
+            # Ending the day (or reaching time limit) at a non-hub airport is invalid (-infinity).
+            V = np.full((self.N_T, self.N_P), -1e12)
+            hub_idx = self.icao_to_idx[self.HUB_AIRPORT_ICAO]
+            V[:, hub_idx] = 0  # Being at the hub is always a valid "safe" state with 0 future penalty
+
             D = np.full((self.N_T, self.N_P), -1, dtype=int)
 
             for t in range(self.N_T - 2, -1, -1):
@@ -248,7 +254,9 @@ def calculate_costs(distance, aircraft_type_specs):
     speed = aircraft_type_specs.get('speed_kmh', 0)
     flight_hours = distance / speed if speed > 0 else 0
     time_based = aircraft_type_specs.get('time_based_cost_eur_hour', 0) * flight_hours
-    fuel = aircraft_type_specs.get('fuel_cost_eur_kg', 0) * (distance / 1.5)
+    # Fuel cost = (Fuel Parameter * Fuel Price / 1.5) * Distance. Fuel Price f = 1.42 USD/gallon
+    fuel_price = 1.42*0.85
+    fuel = (aircraft_type_specs.get('fuel_cost_eur_kg', 0) * fuel_price / 1.5) * distance
     total = fixed + time_based + fuel
     return {'total_cost': total, 'fixed': fixed, 'time': time_based, 'fuel': fuel}
 

@@ -1,51 +1,56 @@
 # Feedback on Airline Assignment Code
 
-This document provides an assessment of the `airline_assignment.py` script against the requirements outlined in `Assignment2_2025.pdf`. The analysis focuses on the static demand model.
+## General Overview
+The code structure is logical and well-organized. You have effectively separated data processing from the core logic. The use of a class-based structure for the `DynamicProgrammingModel` makes the code readable and modular. The greedy heuristic approach (scheduling one aircraft at a time and depleting demand) is a pragmatic choice for this type of resource allocation problem and is appropriate given the complexity.
 
-The code implements a dynamic programming approach to solve the aircraft routing and scheduling problem. While the overall structure is sound and correctly follows many of the assignment's specifications (e.g., time discretization, flight time calculation, basic constraints), there are four key areas where the implementation deviates from the requirements.
+## Critical Issues
 
-## 1. Hub-and-Spoke Constraint Not Enforced
+### 1. Fuel Cost Calculation Formula
+**Issue:** There appears to be a discrepancy in the fuel cost calculation.
+- **Assignment Formula:** $C_{F_{ij}}^k = \frac{c_F^k \times f}{1.5} d_{ij}$
+- **Your Code:** `fuel = aircraft_type_specs.get('fuel_cost_eur_kg', 0) * (distance / 1.5)`
 
-**Observation:** The current model allows for the creation of point-to-point routes (e.g., a flight from a spoke airport to another spoke airport). The DP formulation considers flying from the current airport `i` to any other airport `j`.
+**Analysis:**
+Your code maps the Excel column "Fuel Cost Parameter" to `fuel_cost_eur_kg`. In the assignment context, "Fuel Cost Parameter" usually corresponds to $c_F^k$. The assignment explicitly defines a separate variable $f = 1.42$ (Fuel Price).
+Your current implementation **omits the multiplication by $f$ (1.42)**. This means your fuel costs are likely underestimated, which could significantly affect the profitability of routes and the resulting schedule.
 
-**Requirement:** The assignment explicitly states, "...only flights to and from the hub are considered."
+**Recommendation:**
+Update the cost calculation in `calculate_costs` to include the fuel price factor $f$:
+```python
+# Assuming f = 1.42 as per assignment
+fuel_price = 1.42 > translate this into EUR directly
+fuel = (aircraft_type_specs.get('fuel_cost_eur_kg', 0) * fuel_price / 1.5) * distance
+```
+*(Note: Check if unit conversion for currency (USD to EUR) is required or if $f$ is already in the appropriate currency unit for the formula).*
 
-**Impact:** The model generates schedules that are not valid under the assignment's rules, potentially finding profitable but disallowed routes.
+### 2. Dynamic Programming Boundary Conditions (End-at-Hub Constraint)
+**Issue:** The DP Value function `V` is initialized to zeros (`np.zeros`).
+**Analysis:**
+The assignment requires aircraft to end the day at the hub. Currently, your `solve` method runs the DP backwards from $t=240$.
+- At $t=240$, `V` is 0 for all airports.
+- This implies that ending the day at a Spoke airport has the same "value" (0) as ending at the Hub.
+- While your `_reconstruct_and_deplete_demand` function correctly *discards* schedules that don't end at the hub, the DP process itself generates the policy `D` believing that ending at a spoke is fine.
+- **Consequence:** The DP might choose a high-profit flight to a spoke late in the day (because it sees $V_{final} = 0$), preventing it from seeing a slightly lower-profit flight that safely returns to the hub. This leads to the "Schedule discarded" messages and potentially missed profitable opportunities.
 
-**Suggestion:** Modify the DP logic. When an aircraft is at a spoke airport (any airport other than the hub, "EHAM"), the only permissible flying decision should be to return to the hub. When at the hub, it can fly to any spoke. This simplifies the decision space at each state.
+**Recommendation:**
+Initialize `V` at the final time step ($t=N_T$) to penalize ending at non-hub airports.
+Conceptually:
+$$ V(N_T, i) = \begin{cases} 0 & \text{if } i = \text{Hub} \\ - \infty & \text{if } i \neq \text{Hub} \end{cases} $$
+In code, you can handle this by setting the initial `V` (which represents future value) to a large negative number for all indices except the Hub index before starting the backward induction loop.
 
----
+### 3. Flight Time Calculation
+**Observation:**
+You calculated flight duration as: `(distance / speed * 60) + 30`.
+This correctly accounts for the "15 min extra for take-off" and "15 min extra for landing" (Total 30 mins) specified in the assignment. This is correct.
 
-## 2. Incorrect Demand Depletion Model
+## Minor Suggestions
 
-**Observation:** The `_reconstruct_and_deplete_demand` function uses a simplified, proportional approach to reduce demand. It calculates the fraction of passengers taken from the total available demand in the three-hour window and reduces the *total daily demand* by that fraction.
+### Demand Depletion Logic
+Your greedy approach depletes demand immediately after scheduling an aircraft. This is a valid heuristic. However, in your report, you should explicitly acknowledge that this does not guarantee a global optimum (since a clearer "later" flight might have been better served by a "earlier" aircraft type). This is expected for this assignment but worth noting in the "Methodology" section of your report.
 
-**Requirement:** The assignment specifies a sequential depletion mechanism: "After adding an aircraft route to your solution, you should remove the demand that you have transported. To do this, remove the demand from t, t − 1, and t - 2, sequential, until the aircraft is full or no more demand is available."
+### Variable Naming
+- `fuel_cost_eur_kg`: The suffix `_eur_kg` might be misleading if the parameter is unitless or if the cost is actually in USD (due to $f$ being in USD/gallon). Double-check the units in the appendix.
 
-**Impact:** The current method inaccurately depletes demand. By reducing the overall daily demand, it affects future calculations for all time slots, not just the specific hourly buckets that were drawn from. This will lead to incorrect passenger numbers for subsequent flights.
-
-**Suggestion:** The demand model needs to be more granular. Instead of a single daily demand value per route, you should maintain an array or list of 24 hourly demand values for each route. When a flight occurs, you would attempt to fill the aircraft by sequentially drawing passengers from the demand buckets for hour `t`, then `t-1`, then `t-2`, and reducing those specific buckets to zero as they are consumed.
-
----
-
-## 3. Daily Lease Cost Is Omitted from Profit Calculation
-
-**Observation:** The `calculate_costs` function correctly computes the operating costs per flight leg (fixed, time-based, and fuel). However, the daily lease cost for each aircraft, while loaded from the `FleetType.xlsx` file, is never used to evaluate the profitability of a full-day schedule. The DP's value function, `V`, maximizes the sum of per-leg profits.
-
-**Requirement:** "All aircraft are leased, and therefore a leasing cost needs to be accounted for." And "You do not have to use all the aircraft in your fleet. Only if it is profitable."
-
-**Impact:** The model may generate and keep schedules for aircraft where the total profit from all flights in a day does not exceed the daily lease cost, making the use of that aircraft a net loss.
-
-**Suggestion:** After reconstructing the full schedule for an aircraft (`_reconstruct_and_deplete_demand`), calculate the total profit for that schedule. Compare this total profit against the aircraft's `lease_cost_eur_day`. If the profit is less than the lease cost, the entire schedule for that aircraft should be discarded.
-
----
-
-## 4. Load Factor Assumption Misinterpreted
-
-**Observation:** The code calculates the number of passengers for a flight by taking the minimum of available seats and the actual available demand (`passengers = min(aircraft_specs.get('Seats', 0), sum(demands))`).
-
-**Requirement:** "Assume a load factor of 80%."
-
-**Impact:** This is a subtle point of interpretation. The requirement seems to be a simplifying assumption for the planning model. By simulating the exact number of passengers, the model is more complex than requested. A strict interpretation would mean revenue should be calculated based on the assumption that an aircraft will be filled to 80% capacity if sufficient demand exists.
-
-**Suggestion:** Change the passenger calculation. The number of passengers on a flight should be `min(sum(demands), 0.80 * aircraft_specs.get('Seats', 0))`. This aligns with the idea of planning for an 80% load factor while still being limited by available demand. Ensure that the demand that will be removed is 0,8 as well.
+### Reporting
+- Ensure you mention the **Star Network** constraint (only Hub<->Spoke flights) in your model description, as your code enforces this via `possible_destinations`.
+- Use the generated "block hours" and "profit" output to validate against the "Minimum Block Time" (6 hours) constraint in your results section.
