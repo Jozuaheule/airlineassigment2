@@ -2,6 +2,10 @@
 import pandas as pd
 import numpy as np
 
+# ----------------------------------------------- #
+#           DATA PROCESSING FUNCTIONS             #
+
+
 def haversine(lat1, lon1, lat2, lon2):
     """
     Calculate the great-circle distance between two points

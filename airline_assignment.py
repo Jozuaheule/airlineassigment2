@@ -204,7 +204,8 @@ class DynamicProgrammingModel:
                         tat_steps = int(np.ceil(tat_min / self.TIME_STEP_MINUTES))
                         t_ready = t_arrival + tat_steps
                         
-                        if t_ready >= self.N_T: continue
+                        # Constraint: Flight must arrive by end of day (midnight)
+                        if t_arrival > self.N_T: continue
 
                         demands = self._get_demand(t, i, j, modifiable_hourly_demand)
                         passengers = min(sum(demands), self.LOAD_FACTOR * aircraft_specs.get('seats', 0))
@@ -215,7 +216,16 @@ class DynamicProgrammingModel:
                         costs = calculate_costs(distance, aircraft_specs)['total_cost']
                         profit = revenue - costs
 
-                        v_fly = profit + V[t_ready, j]
+                        # Calculate future value
+                        if t_ready < self.N_T:
+                            future_value = V[t_ready, j]
+                        else:
+                            # If TAT pushes ready time past midnight, check if we landed at Hub.
+                            # If at Hub (j == hub_idx), End-of-Day value is 0.
+                            # If at Spoke (j != hub_idx), End-of-Day value is penalty (-infinity).
+                            future_value = 0 if j == hub_idx else -1e12
+
+                        v_fly = profit + future_value
 
                         if v_fly > best_value:
                             best_value = v_fly
