@@ -4,7 +4,7 @@ import numpy as np
 
 # ----------------------------------------------- #
 #           DATA PROCESSING FUNCTIONS             #
-
+# ----------------------------------------------- #
 
 def haversine(lat1, lon1, lat2, lon2):
     """
@@ -31,8 +31,7 @@ def load_demand_and_airport_data(file_path="DemandGroup6.xlsx"):
     """
     Loads airport data and the demand matrix from the specified Excel file.
     This function reads the whole sheet and slices the required data blocks.
-    It handles non-numeric values in the demand block by coercing them to numbers.
-    The source file is missing one column of demand data, so it's padded with zeros.
+    It handles non-numeric values in the demand block by changing them to numbers.
 
     Args:
         file_path (str): The path to the DemandGroup6.xlsx file.
@@ -40,7 +39,7 @@ def load_demand_and_airport_data(file_path="DemandGroup6.xlsx"):
     Returns:
         tuple: A tuple containing:
             - pd.DataFrame: Airport metadata (ICAO, Latitude, Longitude, Runway).
-            - pd.DataFrame: The 20x20 demand matrix with ICAO codes as index and columns.
+            - pd.DataFrame: The demand matrix with ICAO codes as index and columns.
     """
     # Read the entire sheet at once to avoid complex parsing arguments
     full_sheet = pd.read_excel(file_path, header=None)
@@ -50,7 +49,8 @@ def load_demand_and_airport_data(file_path="DemandGroup6.xlsx"):
     airport_df = airport_block.T
     airport_df.columns = ['AirportName', 'ICAO', 'Latitude (deg)', 'Longitude (deg)', 'Runway length (m)']
     airport_df.set_index('ICAO', inplace=True)
-    # Coerce coordinate columns to numeric, as they might be read as objects
+
+    # change coordinate columns to numeric, as they might be read as objects
     for col in ['Latitude (deg)', 'Longitude (deg)']:
         airport_df[col] = pd.to_numeric(airport_df[col], errors='coerce')
 
@@ -59,7 +59,7 @@ def load_demand_and_airport_data(file_path="DemandGroup6.xlsx"):
     demand_block = full_sheet.iloc[11:30, 1:22]                        
     demand_block.columns = full_sheet.iloc[10, 1:22] 
 
-    # Create the final 20x20 demand dataframe
+    # Create the final demand dataframe
     demand_block.set_index(demand_block.columns[0], inplace=True)      
     demand_df = demand_block 
 
@@ -148,13 +148,16 @@ def load_hour_coefficients(file_path="HourCoefficients.xlsx"):
     hour_coeffs_df = hour_coeffs_df.set_index('ICAO').drop(columns=['Hour_of_Day', 'Airport'])
     # The first row is junk, let's drop rows where the index is NaN
     hour_coeffs_df = hour_coeffs_df[hour_coeffs_df.index.notna()]
+
     return hour_coeffs_df
 
 
 def main():
     """
     Main function to demonstrate the data loading functions.
+    Only run when testing this file
     """
+
     print("--- Loading Airport and Demand Data ---")
     airports, demand = load_demand_and_airport_data()
     print("\nAirport Data:")

@@ -9,9 +9,18 @@ class DynamicProgrammingModel:
     This implementation uses a greedy heuristic, solving the schedule for one aircraft
     at a time and depleting demand, which is a practical approach for this complex
     resource allocation problem.
+
+    Main() returns:
+        - Best strategy
+        - Aircraft schedule and allocation
     """
 
     def __init__(self, airports_df, demand_df, fleet_df, hour_coefficients_df, distance_matrix_df):
+        """
+        Initialize the model with dataframes, constants, and constraints.
+        Sets up the hourly demand matrix and maps airport IDs.
+        
+        """
         self.airports = airports_df
         self.original_demand = demand_df.copy()
         
@@ -22,6 +31,7 @@ class DynamicProgrammingModel:
                 new_row = aircraft_type.copy()
                 new_row['type'] = type_name
                 expanded_fleet_list.append(new_row)
+
         self.fleet_data = pd.DataFrame(expanded_fleet_list)
         self.fleet_data.reset_index(drop=True, inplace=True)
         self.fleet_data['aircraft_id'] = self.fleet_data.index
@@ -44,6 +54,7 @@ class DynamicProgrammingModel:
         self.N_A = len(self.fleet_data) # N_A is now the total number of aircraft
 
         # --- Initialize Hourly Demand ---
+        # Makes hourly demand matrix as begin
         self.hourly_demand = np.zeros((self.N_P, self.N_P, 24))
         for i in range(self.N_P):
             for j in range(self.N_P):
@@ -58,7 +69,14 @@ class DynamicProgrammingModel:
                             self.hourly_demand[i, j, hour] = daily_demand * coefficient
 
     def _get_demand(self, time_step, origin_idx, dest_idx, current_hourly_demand):
-        """Calculates demand for the three relevant hourly buckets."""
+        """Calculates demand for the three relevant hourly buckets.
+        
+        Args:
+            self, time_step(int), origin_idx(str), dest_idx(str), current_hourly_demand(list)
+
+        Returns:
+            demands (list) that holds the relevant demand values
+        """
         demands = []
         hour_t = int(np.floor(time_step / (60 / self.TIME_STEP_MINUTES)))
         for t_offset in range(3):  # For hours t, t-1, t-2
@@ -73,6 +91,7 @@ class DynamicProgrammingModel:
         """
         Reconstructs the schedule for a single aircraft, calculates its profitability,
         and depletes demand sequentially. Enforces end-at-hub constraint.
+
         """
         schedule = []
         block_time_minutes = 0
@@ -87,36 +106,44 @@ class DynamicProgrammingModel:
                 current_t += 1
                 continue
 
+            # Obtain general flight information
             origin_icao = self.idx_to_icao[current_loc_idx]
             dest_icao = self.idx_to_icao[decision_idx]
             distance = self.distance_matrix.loc[origin_icao, dest_icao]
             speed = aircraft_specs.get('speed_kmh', 0)
             
+            # Add 2x 15 minutes to the flight duration
             flight_duration_minutes = (distance / speed * 60) + 30 if speed > 0 else float('inf')
             flight_duration_steps = int(np.ceil(flight_duration_minutes / self.TIME_STEP_MINUTES))
             arrival_t = current_t + flight_duration_steps
 
+            # Define maximum passengers based on aircraft capacity and load factor
             hour_t = int(np.floor(current_t / (60 / self.TIME_STEP_MINUTES)))
             passengers_to_take = self.LOAD_FACTOR * aircraft_specs.get('seats', 0)
             passengers_taken = 0
             
+            # Ensure dynamic demand of t, t-1, t-2
             demands_to_deplete = []
             for t_offset in range(3):
                 if passengers_taken >= passengers_to_take: break
                 hour = hour_t - t_offset
                 if hour < 0: continue
                 
+                # assess demand during specific hour and find amount of taken passengers of that hour
                 available_demand_in_hour = modifiable_hourly_demand[current_loc_idx, decision_idx, hour]
                 can_take = min(passengers_to_take - passengers_taken, available_demand_in_hour)
                 
+                # remove the demand from the demand matrix
                 if can_take > 0:
                     passengers_taken += can_take
                     demands_to_deplete.append({'hour': hour, 'amount': can_take})
 
+            # demand matrix gets updated by subtracting the amount of passengers taken
             if passengers_taken > 0:
                 for item in demands_to_deplete:
                     modifiable_hourly_demand[current_loc_idx, decision_idx, item['hour']] -= item['amount']
                 
+                # General passenger revenue calculations
                 revenue = calculate_revenue(distance, passengers_taken)
                 costs = calculate_costs(distance, aircraft_specs)['total_cost']
                 profit = revenue - costs
@@ -129,18 +156,22 @@ class DynamicProgrammingModel:
                     "passengers": round(passengers_taken)
                 })
 
+            # register the amount of hours flown
             block_time_minutes += flight_duration_minutes
             
+            # assess arrival time by taking TAT into account
             tat_min = aircraft_specs.get('tat_min', 0)
             tat_steps = int(np.ceil(tat_min / self.TIME_STEP_MINUTES))
             current_t = arrival_t + tat_steps
             
+            # Update location of the aircraft
             current_loc_idx = decision_idx
         
         hub_idx = self.icao_to_idx[self.HUB_AIRPORT_ICAO]
         if current_loc_idx != hub_idx:
             return None, 0, 0
 
+        # only if blocktime of 6 hours is achieved, aircraft gets added.
         if block_time_minutes / 60 >= self.MIN_BLOCK_HOURS:
             return schedule, block_time_minutes, total_profit
         
@@ -155,6 +186,7 @@ class DynamicProgrammingModel:
         total_net_profit = 0
         modifiable_hourly_demand = self.hourly_demand.copy()
 
+        # Due to different aircraft, the sequence is varied in cost, seats and range.
         fleet_to_schedule = self.fleet_data
         if sequencing_strategy:
             ascending = 'cost' in sequencing_strategy or 'lease' in sequencing_strategy
@@ -162,6 +194,7 @@ class DynamicProgrammingModel:
         
         aircraft_order = fleet_to_schedule.index
 
+        # Loop to solve dynamic programming problem is entered
         for aircraft_id in aircraft_order:
             aircraft_specs = self.fleet_data.iloc[aircraft_id]
             print(f"  Aircraft {aircraft_id} ({aircraft_specs['type']})...")
@@ -173,8 +206,11 @@ class DynamicProgrammingModel:
             hub_idx = self.icao_to_idx[self.HUB_AIRPORT_ICAO]
             V[:, hub_idx] = 0  # Being at the hub is always a valid "safe" state with 0 future penalty
 
+            # Decision matrix is made
             D = np.full((self.N_T, self.N_P), -1, dtype=int)
 
+            # Iterate backwards through time steps and airports (Planning Phase)
+            # Dynamic programming logic using the Bellman equation
             for t in range(self.N_T - 2, -1, -1):
                 for i in range(self.N_P):
                     v_stay = V[t + 1, i]
@@ -191,22 +227,27 @@ class DynamicProgrammingModel:
                         dest_icao = self.idx_to_icao[j]
                         distance = self.distance_matrix.loc[origin_icao, dest_icao]
 
+                        # Set constraints dependent on the aircraft characteristics
                         if distance > aircraft_specs.get('range_km', 0): continue
                         if self.airports.loc[dest_icao].get('Runway length (m)', 0) < aircraft_specs.get('runway_m', 0): continue
                         if self.airports.loc[origin_icao].get('Runway length (m)', 0) < aircraft_specs.get('runway_m', 0): continue
 
+                        # compute flight time
                         speed = aircraft_specs.get('speed_kmh', 0)
                         flight_duration_minutes = (distance / speed * 60) + 30 if speed > 0 else float('inf')
                         flight_duration_steps = int(np.ceil(flight_duration_minutes / self.TIME_STEP_MINUTES))
                         t_arrival = t + flight_duration_steps
 
+                        # compute total time to get ready
                         tat_min = aircraft_specs.get('tat_min', 0)
                         tat_steps = int(np.ceil(tat_min / self.TIME_STEP_MINUTES))
                         t_ready = t_arrival + tat_steps
                         
                         # Constraint: Flight must arrive by end of day (midnight)
+                        # It is possible that TAT steps happened after midnight (crucial constraint)
                         if t_arrival > self.N_T: continue
 
+                        # start with assessing demands and profitability
                         demands = self._get_demand(t, i, j, modifiable_hourly_demand)
                         passengers = min(sum(demands), self.LOAD_FACTOR * aircraft_specs.get('seats', 0))
                         
@@ -225,18 +266,23 @@ class DynamicProgrammingModel:
                             # If at Spoke (j != hub_idx), End-of-Day value is penalty (-infinity).
                             future_value = 0 if j == hub_idx else -1e12
 
+                        # Bellman update
                         v_fly = profit + future_value
 
                         if v_fly > best_value:
                             best_value = v_fly
                             best_decision = j
 
+                    # Update the value function and decision matrix
                     V[t, i] = best_value
                     D[t, i] = best_decision
 
+            # Per aircraft, solution is computed
+            # temp_hourly_demand is updated in the function reconstruct_and_deplete
             temp_hourly_demand = modifiable_hourly_demand.copy()
             schedule, block_time, schedule_profit = self._reconstruct_and_deplete_demand(aircraft_id, D, temp_hourly_demand)
             
+            # Include lease cost in the profit calculation
             lease_cost = aircraft_specs.get('lease_cost_eur_day', 0)
             net_profit = schedule_profit - lease_cost
 
@@ -245,6 +291,7 @@ class DynamicProgrammingModel:
                 final_schedules.extend(schedule)
                 total_net_profit += net_profit
                 modifiable_hourly_demand = temp_hourly_demand
+
             elif not schedule:
                  print(f"    -> Schedule discarded: Fails constraints (min block hours or ends at hub).")
             else:
@@ -274,7 +321,6 @@ def main():
     """Main function to load data, run the model, and print results."""
     print("--- Loading All Data ---")
     airports, demand = load_demand_and_airport_data()
-    fleet = load_fleet_data()
     hour_coeffs = load_hour_coefficients()
     distance_matrix = calculate_distance_matrix(airports)
     print("--- Data Loading Complete ---")
