@@ -67,6 +67,12 @@ class DynamicProgrammingModel:
                         for hour in range(24):
                             coefficient = self.hour_coefficients.loc[origin_icao, hour]
                             self.hourly_demand[i, j, hour] = daily_demand * coefficient
+     
+
+     # ----------------------------------------------------------------------------- #
+     #                               HELPER FUNCTIONS                                #
+     # ----------------------------------------------------------------------------- #
+
 
     def _get_demand(self, time_step, origin_idx, dest_idx, current_hourly_demand):
         """Calculates demand for the three relevant hourly buckets.
@@ -86,6 +92,24 @@ class DynamicProgrammingModel:
                 continue
             demands.append(current_hourly_demand[origin_idx, dest_idx, hour])
         return demands
+    
+    def calculate_revenue(self, distance, passengers):
+        """Calculates revenue based on RPK."""
+        if distance <= 0 or passengers <= 0: return 0
+        yield_per_rpk = 5.9 * (distance ** -0.76) + 0.043
+        return yield_per_rpk * distance * passengers
+
+    def calculate_costs(self, distance, aircraft_type_specs):
+        """Calculates operating costs for a flight leg."""
+        fixed = aircraft_type_specs.get('fixed_op_cost_eur_flight', 0)
+        speed = aircraft_type_specs.get('speed_kmh', 0)
+        flight_hours = distance / speed if speed > 0 else 0
+        time_based = aircraft_type_specs.get('time_based_cost_eur_hour', 0) * flight_hours
+        # Fuel cost = (Fuel Parameter * Fuel Price / 1.5) * Distance. Fuel Price f = 1.42 USD/gallon
+        fuel_price = 1.42*0.85
+        fuel = (aircraft_type_specs.get('fuel_cost_eur_kg', 0) * fuel_price / 1.5) * distance
+        total = fixed + time_based + fuel
+        return {'total_cost': total, 'fixed': fixed, 'time': time_based, 'fuel': fuel}
 
     def _reconstruct_and_deplete_demand(self, aircraft_id, D, modifiable_hourly_demand):
         """
@@ -144,8 +168,8 @@ class DynamicProgrammingModel:
                     modifiable_hourly_demand[current_loc_idx, decision_idx, item['hour']] -= item['amount']
                 
                 # General passenger revenue calculations
-                revenue = calculate_revenue(distance, passengers_taken)
-                costs = calculate_costs(distance, aircraft_specs)['total_cost']
+                revenue = self.calculate_revenue(distance, passengers_taken)
+                costs = self.calculate_costs(distance, aircraft_specs)['total_cost']
                 profit = revenue - costs
                 total_profit += profit
 
@@ -176,6 +200,10 @@ class DynamicProgrammingModel:
             return schedule, block_time_minutes, total_profit
         
         return None, 0, 0
+
+     # ----------------------------------------------------------------------------- #
+     #                               MAIN SOLVER LOOP                                #
+     # ----------------------------------------------------------------------------- #
 
     def solve(self, sequencing_strategy=None):
         """
@@ -253,8 +281,8 @@ class DynamicProgrammingModel:
                         
                         if passengers <= 0: continue
 
-                        revenue = calculate_revenue(distance, passengers)
-                        costs = calculate_costs(distance, aircraft_specs)['total_cost']
+                        revenue = self.calculate_revenue(distance, passengers)
+                        costs = self.calculate_costs(distance, aircraft_specs)['total_cost']
                         profit = revenue - costs
 
                         # Calculate future value
@@ -299,23 +327,7 @@ class DynamicProgrammingModel:
         
         return final_schedules, total_net_profit
 
-def calculate_revenue(distance, passengers):
-    """Calculates revenue based on RPK."""
-    if distance <= 0 or passengers <= 0: return 0
-    yield_per_rpk = 5.9 * (distance ** -0.76) + 0.043
-    return yield_per_rpk * distance * passengers
 
-def calculate_costs(distance, aircraft_type_specs):
-    """Calculates operating costs for a flight leg."""
-    fixed = aircraft_type_specs.get('fixed_op_cost_eur_flight', 0)
-    speed = aircraft_type_specs.get('speed_kmh', 0)
-    flight_hours = distance / speed if speed > 0 else 0
-    time_based = aircraft_type_specs.get('time_based_cost_eur_hour', 0) * flight_hours
-    # Fuel cost = (Fuel Parameter * Fuel Price / 1.5) * Distance. Fuel Price f = 1.42 USD/gallon
-    fuel_price = 1.42*0.85
-    fuel = (aircraft_type_specs.get('fuel_cost_eur_kg', 0) * fuel_price / 1.5) * distance
-    total = fixed + time_based + fuel
-    return {'total_cost': total, 'fixed': fixed, 'time': time_based, 'fuel': fuel}
 
 def main():
     """Main function to load data, run the model, and print results."""
